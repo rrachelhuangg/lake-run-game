@@ -19,12 +19,28 @@
     }
     h1 { font-size: 1.6rem; letter-spacing: 0.05em; }
     canvas {
+      touch-action: manipulation; /* no double-tap zoom when tapping quickly to jump */
       border-radius: 12px;
       box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
       width: min(95vw, 900px);
       height: auto;
     }
     .hint { font-size: 0.9rem; color: #94a3b8; }
+    /* phones: game area takes 80% of the screen height (the script matches the
+       game's shape to this box so nothing is stretched). keyboard hint is hidden
+       and the header tightened so everything fits. */
+    @media (max-width: 767px) and (orientation: portrait) {
+      canvas { width: 95vw; height: 80vh; height: 80svh; }
+    }
+    @media (max-height: 500px) and (orientation: landscape) {
+      canvas { width: auto; height: 80vh; height: 80svh; }
+    }
+    @media (max-width: 767px) and (orientation: portrait), (max-height: 500px) and (orientation: landscape) {
+      body { gap: 6px; }
+      h1 { font-size: 1.2rem; }
+      .help-link { margin-top: 0; }
+      .hint { display: none; }
+    }
     kbd {
       background: #1e293b;
       border: 1px solid #334155;
@@ -32,42 +48,155 @@
       padding: 1px 6px;
       font-family: inherit;
     }
+    .help-link {
+      margin-top: -6px;
+      background: none;
+      border: none;
+      color: #7dd3fc;
+      font: inherit;
+      font-size: 0.9rem;
+      text-decoration: underline;
+      cursor: pointer;
+    }
+    .help-link:hover { color: #bae6fd; }
+
+    #instructions {
+      margin: auto;
+      max-width: min(90vw, 460px);
+      padding: 24px 28px;
+      border: 1px solid #334155;
+      border-radius: 12px;
+      background: #1e293b;
+      color: #e2e8f0;
+      line-height: 1.5;
+    }
+    #instructions::backdrop { background: rgba(2, 6, 23, 0.7); }
+    #instructions h2 { font-size: 1.3rem; margin-bottom: 12px; }
+    #instructions h3 { font-size: 1rem; margin: 16px 0 6px; }
+    #instructions ul { list-style: none; }
+    #instructions li { margin: 4px 0; }
+    #instructions table { width: 100%; border-collapse: collapse; }
+    #instructions th, #instructions td {
+      padding: 4px 8px;
+      border-bottom: 1px solid #334155;
+      text-align: left;
+    }
+    #instructions th { font-size: 0.85rem; color: #94a3b8; font-weight: 600; }
+    #instructions td:nth-child(2) { font-size: 1.3rem; }
+    #instructions .bad { color: #fca5a5; }
+    #instructions .good { color: #86efac; }
+    #house-photo {
+      margin: auto;
+      padding: 16px;
+      border: 1px solid #334155;
+      border-radius: 12px;
+      background: #1e293b;
+      color: #e2e8f0;
+    }
+    #house-photo::backdrop { background: rgba(2, 6, 23, 0.7); }
+    #house-photo img {
+      display: block;
+      max-width: min(85vw, 800px);
+      max-height: 75vh;
+      border-radius: 8px;
+    }
+    #instructions .close, #house-photo .close {
+      display: block;
+      margin: 20px auto 0;
+      padding: 6px 20px;
+      border: none;
+      border-radius: 6px;
+      background: #0ea5e9;
+      color: #fff;
+      font: inherit;
+      cursor: pointer;
+    }
+    #instructions .close:hover, #house-photo .close:hover { background: #38bdf8; }
   </style>
 </head>
 <body>
   <h1>Lake Anna Run</h1>
+  <button type="button" class="help-link" id="help-link">How to play</button>
+  <dialog id="instructions">
+    <h2>How to play</h2>
+    <p>Steer your boat across Lake Anna for as long as you can. The boat speeds up the farther you go. <span id="cabin-verb">Click</span> on the cabin for a surprise!</p>
+    <h3>Controls</h3>
+    <ul id="controls-list">
+      <li><kbd>↑</kbd> or <kbd>Space</kbd>: start / jump / retry</li>
+      <li><kbd>↓</kbd>: fast drop</li>
+    </ul>
+    <h3 class="bad">Avoid</h3>
+    <table>
+      <thead><tr><th>Obstacle</th><th>Emoji</th></tr></thead>
+      <tbody id="bad-list"></tbody>
+    </table>
+    <h3 class="good">Collect</h3>
+    <table>
+      <thead><tr><th>Obstacle</th><th>Emoji</th><th>Points</th></tr></thead>
+      <tbody id="good-list"></tbody>
+    </table>
+    <form method="dialog"><button class="close">Got it</button></form>
+  </dialog>
+  <dialog id="house-photo">
+    <img src="/static/cabin.jpg" alt="The lake house"
+      onerror="this.replaceWith('Add a photo at static/cabin.jpg to show it here.')" />
+    <form method="dialog"><button class="close">Close</button></form>
+  </dialog>
   <canvas id="game" width="900" height="400"></canvas>
-  <p class="hint"><kbd>↑</kbd> jump &nbsp; <kbd>↓</kbd> drop fast &nbsp; <kbd>←</kbd><kbd>→</kbd> move</p>
+  <p class="hint"><kbd>↑</kbd> jump &nbsp; <kbd>↓</kbd> fast drop</p>
 
   <script>
     const canvas = document.getElementById("game");
     const ctx = canvas.getContext("2d");
-    const W = canvas.width;
-    const H = canvas.height;
-    const WATER_Y = 300; // water surface line
+    // game size in canvas units. desktop is a fixed 900x400; on a phone held upright
+    // the view is narrower (so everything is drawn bigger) and taller to fill the
+    // screen, with the extra height going to sky. set by applyLayout().
+    const MOBILE_PORTRAIT = matchMedia("(max-width: 767px) and (orientation: portrait)");
+    const MOBILE_W = 560; // game units across on a phone held upright
+    const MOBILE_SPEED = 0.75; // obstacles move slower on the narrower view so there's still time to react
+    let W, H;
+    let WATER_Y; // water surface line
+    let SKY_SHIFT; // how much taller the sky is than on desktop (0 on desktop)
+    let SPEED_SCALE; // screen pixels moved per unit of speed
+    let PX_PER_M; // pixels scrolled per meter of distance
+    let SUN_X, SUN_Y, DOCK_TOP;
 
     const GRAVITY = 0.6;
     const JUMP = -12.5;
     const FAST_FALL = 1.2;
-    const SIDE_SPEED = 4;
     const START_SPEED = 4;
     const MAX_SPEED = 9;
 
     // emoji obstacles: size = font size, hit box is shrunk a bit to feel fair
+    // negative obstacles (red glow): hitting one ends the run — jump over them
     const OBSTACLES = [
-      { emoji: "🪨", size: 48, w: 40, h: 34 },
-      { emoji: "🪵", size: 52, w: 46, h: 28 },
-      { emoji: "🦆", size: 40, w: 30, h: 30 },
-      { emoji: "🛟", size: 40, w: 32, h: 32 },
+      { name: "Rocks", emoji: "🪨", size: 48, w: 40, h: 34 },
+      { name: "Logs", emoji: "🪵", size: 52, w: 46, h: 28 },
+      { name: "Spiders", emoji: "🕷️", size: 40, w: 30, h: 30 },
+      { name: "AI", emoji: "🧠🤖", size: 40, w: 32, h: 32 },
     ];
+    // positive obstacles (green glow): hitting one collects it for `value` points
+    const POSITIVE_OBSTACLES = [
+      { name: "Keurig cove coffee", emoji: "☕", size: 40, w: 32, h: 32, value: 3 },
+      { name: "Crab & clam shells", emoji: "🦀🦪", size: 42, w: 36, h: 26, value: 2 },
+      { name: "Frozen tequila seltzers", emoji: "🧊🍷", size: 40, w: 32, h: 32, value: 2 },
+      { name: "Books & nice beds", emoji: "📚🛌", size: 40, w: 32, h: 32, value: 1 },
+    ];
+    const POSITIVE_CHANCE = 0.3; // fraction of spawned obstacles that are positive
+    const GOOD_GLOW = "rgba(34, 255, 102, 1)";
+    const BAD_GLOW = "rgba(255, 50, 50, 1)";
+    // soft halo color behind each obstacle — RGB only, alpha is set when drawing
+    const GOOD_HALO = "34, 255, 102";
+    const BAD_HALO = "255, 50, 50";
 
     const keys = {};
-    let boat, obstacles, speed, distance, nextSpawn, state, waveT, splashes, wake;
+    let boat, obstacles, speed, distance, nextSpawn, state, waveT, splashes, wake, points, popups;
     let best = Number(localStorage.getItem("lakeRunBest") || 0);
+    let bestPoints = Number(localStorage.getItem("lakeRunBestPoints") || 0);
 
     // ripple layout is picked once so ripples drift smoothly instead of flickering
     const RIPPLES = Array.from({ length: 70 }, () => ({
-      x: Math.random() * W,
+      x: Math.random() * 1000, // wraps around the screen, so any range works
       depth: Math.random(), // 0 = far (waterline), 1 = near (bottom of screen)
       len: 0.6 + Math.random() * 0.8,
       phase: Math.random() * Math.PI * 2,
@@ -79,6 +208,8 @@
       obstacles = [];
       splashes = [];
       wake = [];
+      popups = [];
+      points = 0;
       speed = START_SPEED;
       distance = 0;
       nextSpawn = 60;
@@ -96,8 +227,59 @@
       }
     }
 
+    // instructions modal: game pauses while it's open
+    const instructions = document.getElementById("instructions");
+    document.getElementById("help-link").addEventListener("click", () => {
+      for (const k in keys) keys[k] = false; // don't leave a key stuck down
+      instructions.showModal();
+    });
+    // the browser refocuses the link on close; drop focus so Space jumps instead of reopening
+    instructions.addEventListener("close", () => document.activeElement.blur());
+
+    // clicking the starting house opens a photo (static/cabin.jpg); game pauses while it's open
+    const housePhoto = document.getElementById("house-photo");
+    const isPaused = () => instructions.open || housePhoto.open;
+    function canvasPoint(e) {
+      // canvas is scaled by CSS, so convert from screen pixels to game pixels
+      const r = canvas.getBoundingClientRect();
+      return { x: (e.clientX - r.left) * (W / r.width), y: (e.clientY - r.top) * (H / r.height) };
+    }
+    function overHouse(p) {
+      const cabinX = CABIN_X - distance * PX_PER_M; // same scroll as in draw()
+      const base = DOCK_TOP + 32; // emoji baseline used in draw()
+      return p.x > cabinX - 90 && p.x < cabinX + 90 && p.y > base - 190 && p.y < base - 10;
+    }
+    canvas.addEventListener("click", (e) => {
+      if (!overHouse(canvasPoint(e))) return;
+      for (const k in keys) keys[k] = false;
+      housePhoto.showModal();
+    });
+    canvas.addEventListener("mousemove", (e) => {
+      canvas.style.cursor = overHouse(canvasPoint(e)) ? "pointer" : "";
+    });
+
+    // phones: tap the game to start / jump / retry, and show "tap" instead of the arrow keys
+    const TOUCH = matchMedia("(pointer: coarse)").matches;
+    canvas.addEventListener("pointerdown", (e) => {
+      if (e.pointerType === "mouse" || isPaused()) return;
+      if (overHouse(canvasPoint(e))) return; // the click handler opens the photo
+      e.preventDefault();
+      jump();
+    });
+    if (TOUCH) {
+      document.getElementById("controls-list").innerHTML = "<li>Tap the game: start / jump / retry</li>";
+      document.getElementById("cabin-verb").textContent = "Tap";
+    }
+    document.getElementById("bad-list").innerHTML =
+      OBSTACLES.map((o) => `<tr><td>${o.name}</td><td>${o.emoji}</td></tr>`).join("");
+    document.getElementById("good-list").innerHTML = [...POSITIVE_OBSTACLES]
+      .sort((a, b) => a.value - b.value)
+      .map((o) => `<tr><td>${o.name}</td><td>${o.emoji}</td><td>+${o.value}</td></tr>`)
+      .join("");
+
     document.addEventListener("keydown", (e) => {
-      if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", " "].includes(e.key)) {
+      if (isPaused()) return;
+      if (["ArrowUp", "ArrowDown", " "].includes(e.key)) {
         e.preventDefault();
       }
       if ((e.key === "ArrowUp" || e.key === " ") && !e.repeat) jump();
@@ -105,14 +287,15 @@
     });
     document.addEventListener("keyup", (e) => { keys[e.key] = false; });
 
+    function randomObstacle() {
+      const good = Math.random() < POSITIVE_CHANCE;
+      const list = good ? POSITIVE_OBSTACLES : OBSTACLES;
+      return { ...list[Math.floor(Math.random() * list.length)], good };
+    }
+
     function spawnObstacle() {
-      const type = OBSTACLES[Math.floor(Math.random() * OBSTACLES.length)];
+      const type = randomObstacle();
       obstacles.push({ ...type, x: W + 40 });
-      // occasionally a close pair you can clear in one jump
-      if (Math.random() < 0.2 && speed > 6) {
-        const t2 = OBSTACLES[Math.floor(Math.random() * OBSTACLES.length)];
-        obstacles.push({ ...t2, x: W + 40 + type.w + 10 });
-      }
       // gap shrinks a little as speed rises, but always leaves room to land
       const minGap = 45;
       nextSpawn = minGap + Math.random() * 60 + (MAX_SPEED - speed) * 3;
@@ -128,6 +311,23 @@
           life: 30,
         });
       }
+    }
+
+    // splash "explosion" when a positive obstacle is collected: droplets fly out in
+    // every direction, a mix of white water and green sparkles
+    function burst(x, y, value) {
+      for (let i = 0; i < 24; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const v = 2 + Math.random() * 3;
+        splashes.push({
+          x, y,
+          vx: Math.cos(angle) * v - 1,
+          vy: Math.sin(angle) * v - 2,
+          life: 30 + Math.random() * 10,
+          color: i % 3 === 0 ? "rgba(134, 239, 172, 0.95)" : null,
+        });
+      }
+      popups.push({ x, y: y - 10, life: 45, text: `+${value}` });
     }
 
     function boatBox() {
@@ -157,6 +357,10 @@
         best = score;
         localStorage.setItem("lakeRunBest", best);
       }
+      if (points > bestPoints) {
+        bestPoints = points;
+        localStorage.setItem("lakeRunBestPoints", bestPoints);
+      }
     }
 
     function update() {
@@ -167,7 +371,10 @@
       }
       splashes = splashes.filter((s) => s.life > 0);
 
-      for (const f of wake) { f.x -= speed; f.life--; }
+      for (const p of popups) { p.y -= 0.8; p.life--; }
+      popups = popups.filter((p) => p.life > 0);
+
+      for (const f of wake) { f.x -= speed * SPEED_SCALE; f.life--; }
       wake = wake.filter((f) => f.life > 0);
 
       if (state !== "playing") return;
@@ -192,21 +399,27 @@
         }
       }
 
-      // horizontal movement
-      if (keys.ArrowLeft) boat.x -= SIDE_SPEED;
-      if (keys.ArrowRight) boat.x += SIDE_SPEED;
-      boat.x = Math.max(boat.w / 2, Math.min(W * 0.6, boat.x));
-
       // obstacles
       nextSpawn--;
       if (nextSpawn <= 0) spawnObstacle();
 
       const bb = boatBox();
       for (const o of obstacles) {
-        o.x -= speed;
-        if (overlap(bb, obstacleBox(o))) { gameOver(); break; }
+        o.x -= speed * SPEED_SCALE;
+        if (o.collected) continue;
+        const box = obstacleBox(o);
+        if (!overlap(bb, box)) continue;
+        if (o.good) {
+          // got it! remove it with a splash and score its points
+          o.collected = true;
+          points += o.value;
+          burst(o.x, box.y + box.h / 2, o.value);
+        } else {
+          gameOver();
+          break;
+        }
       }
-      obstacles = obstacles.filter((o) => o.x > -60);
+      obstacles = obstacles.filter((o) => !o.collected && o.x > -60);
     }
 
     function drawEmoji(emoji, x, y, size, flip = false, alpha = 1) {
@@ -221,6 +434,55 @@
       ctx.textBaseline = "bottom";
       ctx.fillText(emoji, 0, 0);
       ctx.restore();
+    }
+
+    // glow sprite: the emoji's silhouette filled with the glow color and spread outward
+    // in rings that fade with distance, so it hugs the emoji's shape. Built once per
+    // emoji/size/color and cached, since it's 60+ draws to make one.
+    const GLOW_PAD = 18; // how far the glow reaches past the emoji, in pixels
+    const glowCache = new Map();
+    function getGlowSprite(emoji, size, good) {
+      const key = `${emoji}|${size}|${good}`;
+      if (glowCache.has(key)) return glowCache.get(key);
+
+      const S = Math.ceil(size * 1.3 + GLOW_PAD * 2);
+      const cx = S / 2;
+      const by = S - GLOW_PAD; // emoji baseline (bottom) inside the sprite
+
+      // 1. solid-color silhouette of the emoji
+      const sil = document.createElement("canvas");
+      sil.width = sil.height = S;
+      const s = sil.getContext("2d");
+      s.font = `${size}px "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif`;
+      s.textAlign = "center";
+      s.textBaseline = "bottom";
+      s.fillText(emoji, cx, by);
+      s.globalCompositeOperation = "source-in";
+      s.fillStyle = good ? GOOD_GLOW : BAD_GLOW;
+      s.fillRect(0, 0, S, S);
+
+      // 2. stamp the silhouette in rings around the center: faint far out, strong close in
+      const out = document.createElement("canvas");
+      out.width = out.height = S;
+      const g = out.getContext("2d");
+      const rings = [
+        { r: GLOW_PAD, a: 0.04 },
+        { r: GLOW_PAD * 0.75, a: 0.07 },
+        { r: GLOW_PAD * 0.5, a: 0.14 },
+        { r: GLOW_PAD * 0.3, a: 0.3 },
+        { r: GLOW_PAD * 0.15, a: 0.6 },
+      ];
+      const STEPS = 16;
+      for (const ring of rings) {
+        g.globalAlpha = ring.a;
+        for (let i = 0; i < STEPS; i++) {
+          const ang = (i / STEPS) * Math.PI * 2;
+          g.drawImage(sil, Math.cos(ang) * ring.r, Math.sin(ang) * ring.r);
+        }
+      }
+      const sprite = { canvas: out, cx, by };
+      glowCache.set(key, sprite);
+      return sprite;
     }
 
     // faint upside-down copy of an emoji in the water, squashed for perspective.
@@ -243,7 +505,6 @@
     // dock runs underneath the cabin (which sits on top of it) and pokes out a bit on the right
     const DOCK_START = CABIN_X - 100;
     const DOCK_END = CABIN_X + 120;
-    const DOCK_TOP = WATER_Y - 14; // deck surface height
     const DOCK_POST_GAP = 35;
 
     function dockPosts(start, end) {
@@ -300,8 +561,6 @@
     // depth of field: soften and slightly desaturate the sky + scenery so the sharp
     // boat, cabin and obstacles stand out. Done as one copy so the blur runs once per frame.
     const bgCanvas = document.createElement("canvas");
-    bgCanvas.width = W;
-    bgCanvas.height = WATER_Y;
     const bgCtx = bgCanvas.getContext("2d");
     function blurBackground() {
       bgCtx.clearRect(0, 0, W, WATER_Y);
@@ -352,8 +611,6 @@
       return s - Math.floor(s);
     }
 
-    const SUN_X = W - 110;
-    const SUN_Y = 75;
 
     // build a cumulus cloud once on an offscreen canvas: a flat-bottomed heap of
     // puffs, grey-blue underneath and bright white where the sun (on the right) hits
@@ -426,7 +683,7 @@
       for (let i = 0; i < 6; i++) {
         const span = W + 400;
         const x = (((rand(i + 40) * span - cirrusShift) % span) + span) % span - 200;
-        const y = 20 + rand(i + 50) * 60;
+        const y = 20 + SKY_SHIFT / 2 + rand(i + 50) * 60;
         ctx.beginPath();
         ctx.ellipse(x, y, 90 + rand(i + 60) * 80, 3 + rand(i + 70) * 3, -0.05, 0, Math.PI * 2);
         ctx.fill();
@@ -447,9 +704,9 @@
       // cumulus clouds, drifting slowly and passing in front of the sun
       const span = W + 600;
       for (const c of CLOUDS) {
-        const x = (((c.x - distance * 10 * c.parallax - waveT * c.drift) % span) + span) % span - 300;
+        const x = (((c.x - distance * PX_PER_M * c.parallax - waveT * c.drift) % span) + span) % span - 300;
         ctx.globalAlpha = c.alpha;
-        ctx.drawImage(c.img, x, c.y);
+        ctx.drawImage(c.img, x, c.y + SKY_SHIFT / 2);
       }
       ctx.globalAlpha = 1;
     }
@@ -484,7 +741,7 @@
     // layered background: hazy mountains, a forest line, then bushes on the shore.
     // farther layers scroll slower (parallax) and are paler/bluer (atmospheric haze).
     function drawScenery() {
-      const scroll = distance * 10;
+      const scroll = distance * PX_PER_M;
 
       // far mountains
       const mScroll = scroll * 0.05;
@@ -589,7 +846,7 @@
 
     function drawWater() {
       const depthPx = H - WATER_Y;
-      const scroll = distance * 10;
+      const scroll = distance * PX_PER_M;
 
       // base color: lighter at the far waterline, deep blue up close
       const base = ctx.createLinearGradient(0, WATER_Y, 0, H);
@@ -690,8 +947,8 @@
       blurBackground();
 
       // starting cabin + dock on the left shore — scroll away at water speed as the boat leaves
-      // (distance * 10 = pixels scrolled, same rate as the obstacles and wave streaks)
-      const scrolled = distance * 10;
+      // (distance * PX_PER_M = pixels scrolled, same rate as the obstacles and wave streaks)
+      const scrolled = distance * PX_PER_M;
       const cabinX = CABIN_X - scrolled;
       const dockStart = DOCK_START - scrolled;
       const dockEnd = DOCK_END - scrolled;
@@ -721,7 +978,27 @@
         ctx.beginPath();
         ctx.rect(0, 0, W, surfaceY);
         ctx.clip();
-        withSubjectShadow(() => drawEmoji(o.emoji, o.x, baseY, o.size));
+        // colored glow hugging the emoji's outline: green = collect, red = avoid.
+
+        // soft round halo, centered on the part that sticks out of the water
+        const haloY = surfaceY - o.size * 0.25;
+        const haloR = o.size * 1.1;
+        const halo = ctx.createRadialGradient(o.x, haloY, 0, o.x, haloY, haloR);
+        const rgb = o.good ? GOOD_HALO : BAD_HALO;
+        halo.addColorStop(0, `rgba(${rgb}, 0.45)`);
+        halo.addColorStop(0.5, `rgba(${rgb}, 0.18)`);
+        halo.addColorStop(1, `rgba(${rgb}, 0)`);
+        ctx.fillStyle = halo;
+        ctx.beginPath();
+        ctx.arc(o.x, haloY, haloR, 0, Math.PI * 2);
+        ctx.fill();
+
+        // solid outline glow (pre-rendered silhouette), then the emoji on top
+        const glow = getGlowSprite(o.emoji, o.size, o.good);
+        ctx.globalAlpha = 0.65;
+        ctx.drawImage(glow.canvas, o.x - glow.cx, baseY - glow.by);
+        ctx.globalAlpha = 1;
+        drawEmoji(o.emoji, o.x, baseY, o.size);
         ctx.restore();
 
         // part below the surface: faint, as if seen through the water
@@ -750,12 +1027,27 @@
       ctx.restore();
 
       // splashes
-      ctx.fillStyle = "rgba(255,255,255,0.9)";
       for (const s of splashes) {
+        ctx.fillStyle = s.color || "rgba(255,255,255,0.9)";
         ctx.beginPath();
         ctx.arc(s.x, s.y, 3, 0, Math.PI * 2);
         ctx.fill();
       }
+
+      // "+N" popups floating up from collected obstacles
+      ctx.save();
+      ctx.font = "bold 22px system-ui, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.lineWidth = 4;
+      for (const p of popups) {
+        ctx.globalAlpha = Math.min(1, p.life / 20);
+        ctx.strokeStyle = "#14532d";
+        ctx.strokeText(p.text, p.x, p.y);
+        ctx.fillStyle = "#86efac";
+        ctx.fillText(p.text, p.x, p.y);
+      }
+      ctx.restore();
 
       // drawFocusVignette(); // edge darkening — disabled for now
 
@@ -773,16 +1065,22 @@
         ctx.fillText(`${score} m`, W - 20, 16);
         ctx.font = "16px system-ui, sans-serif";
         ctx.fillStyle = "#e2e8f0";
-        ctx.fillText(`Best ${best} m`, W - 20, 46);
+        ctx.fillText(`Best ${best} m · ${bestPoints} pts`, W - 20, 46);
+        // points from collected positive obstacles, top left
+        ctx.textAlign = "left";
+        ctx.font = "bold 24px system-ui, sans-serif";
+        ctx.fillStyle = "#86efac";
+        ctx.fillText(`Points: ${points}`, 20, 16);
         ctx.restore();
       } else if (state === "ready") {
-        drawText("Press ↑ to start — jump over the obstacles!", 130, 22);
-        if (best) drawText(`Best: ${best} m`, 180, 18, "#fde68a");
+        drawText(TOUCH ? "Tap to start" : "Press ↑ to start", 115 + SKY_SHIFT, 26);
+        if (best || bestPoints) drawText(`Best: ${best} m · ${bestPoints} pts`, 185 + SKY_SHIFT, 18, "#fde68a");
       } else {
-        drawText("Crash!", 120, 52, "#fca5a5");
-        drawText(`Distance: ${score} m`, 170, 26);
-        drawText(`Best: ${best} m`, 205, 22, "#fde68a");
-        drawText("Press ↑ to retry", 250, 20);
+        drawText("Crash!", 110 + SKY_SHIFT, 52, "#fca5a5");
+        drawText(`Distance: ${score} m`, 155 + SKY_SHIFT, 24);
+        drawText(`Points: ${points}`, 188 + SKY_SHIFT, 24, "#86efac");
+        drawText(`Best: ${best} m · ${bestPoints} pts`, 220 + SKY_SHIFT, 20, "#fde68a");
+        drawText(TOUCH ? "Tap to retry" : "Press ↑ to retry", 262 + SKY_SHIFT, 20);
       }
     }
 
@@ -793,6 +1091,7 @@
     function loop(now) {
       acc += Math.min(now - last, 250);
       last = now;
+      if (isPaused()) acc = 0;
       while (acc >= STEP) {
         update();
         acc -= STEP;
@@ -801,6 +1100,40 @@
       requestAnimationFrame(loop);
     }
 
+    function applyLayout() {
+      let w = 900, h = 400, water = 300, speedScale = 1;
+      if (MOBILE_PORTRAIT.matches) {
+        // match the CSS box's shape so the picture isn't stretched
+        const r = canvas.getBoundingClientRect();
+        w = MOBILE_W;
+        h = Math.round((w * r.height) / r.width);
+        water = h - Math.round(h * 0.2);
+        speedScale = MOBILE_SPEED;
+      }
+      if (w === W && h === H) return;
+      const shift = WATER_Y === undefined ? 0 : water - WATER_Y;
+      W = w;
+      H = h;
+      WATER_Y = water;
+      SKY_SHIFT = water - 300;
+      SPEED_SCALE = speedScale;
+      PX_PER_M = 10 * speedScale;
+      SUN_X = W - 110;
+      SUN_Y = 75 + SKY_SHIFT / 2;
+      DOCK_TOP = WATER_Y - 14; // deck surface height
+      canvas.width = W;
+      canvas.height = H;
+      bgCanvas.width = W;
+      bgCanvas.height = WATER_Y;
+      // rotating mid-run: move everything that sits relative to the water
+      if (boat) {
+        boat.y += shift;
+        for (const list of [splashes, wake, popups]) for (const item of list) item.y += shift;
+      }
+    }
+    window.addEventListener("resize", applyLayout);
+
+    applyLayout();
     reset();
     requestAnimationFrame(loop);
   </script>
