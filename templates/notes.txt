@@ -1,0 +1,6 @@
+- allow user to select boat type
+- include cabin at the beginning 
+- let user gain coins and stuff that they can use to customize their cabin
+- allow user to enter the cabin and decorate with the stuff they bought
+- different maps (e.g. trails for hikes?)
+- settings panel to pick different maps, weather, etc.

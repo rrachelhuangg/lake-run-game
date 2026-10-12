@@ -1,0 +1,808 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Lake Anna Run</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      background: #0f172a;
+      color: #e2e8f0;
+      font-family: system-ui, -apple-system, sans-serif;
+    }
+    h1 { font-size: 1.6rem; letter-spacing: 0.05em; }
+    canvas {
+      border-radius: 12px;
+      box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+      width: min(95vw, 900px);
+      height: auto;
+    }
+    .hint { font-size: 0.9rem; color: #94a3b8; }
+    kbd {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 4px;
+      padding: 1px 6px;
+      font-family: inherit;
+    }
+  </style>
+</head>
+<body>
+  <h1>Lake Anna Run</h1>
+  <canvas id="game" width="900" height="400"></canvas>
+  <p class="hint"><kbd>↑</kbd> jump &nbsp; <kbd>↓</kbd> drop fast &nbsp; <kbd>←</kbd><kbd>→</kbd> move</p>
+
+  <script>
+    const canvas = document.getElementById("game");
+    const ctx = canvas.getContext("2d");
+    const W = canvas.width;
+    const H = canvas.height;
+    const WATER_Y = 300; // water surface line
+
+    const GRAVITY = 0.6;
+    const JUMP = -12.5;
+    const FAST_FALL = 1.2;
+    const SIDE_SPEED = 4;
+    const START_SPEED = 4;
+    const MAX_SPEED = 9;
+
+    // emoji obstacles: size = font size, hit box is shrunk a bit to feel fair
+    const OBSTACLES = [
+      { emoji: "🪨", size: 48, w: 40, h: 34 },
+      { emoji: "🪵", size: 52, w: 46, h: 28 },
+      { emoji: "🦆", size: 40, w: 30, h: 30 },
+      { emoji: "🛟", size: 40, w: 32, h: 32 },
+    ];
+
+    const keys = {};
+    let boat, obstacles, speed, distance, nextSpawn, state, waveT, splashes, wake;
+    let best = Number(localStorage.getItem("lakeRunBest") || 0);
+
+    // ripple layout is picked once so ripples drift smoothly instead of flickering
+    const RIPPLES = Array.from({ length: 70 }, () => ({
+      x: Math.random() * W,
+      depth: Math.random(), // 0 = far (waterline), 1 = near (bottom of screen)
+      len: 0.6 + Math.random() * 0.8,
+      phase: Math.random() * Math.PI * 2,
+    }));
+
+    function reset() {
+      // starts moored at the end of the dock
+      boat = { x: DOCK_END + 30, y: WATER_Y, vy: 0, w: 56, h: 30, onWater: true };
+      obstacles = [];
+      splashes = [];
+      wake = [];
+      speed = START_SPEED;
+      distance = 0;
+      nextSpawn = 60;
+      waveT = 0;
+      state = "ready"; // ready | playing | over
+    }
+
+    function jump() {
+      if (state === "over") { reset(); return; }
+      if (state === "ready") state = "playing";
+      if (boat.onWater) {
+        boat.vy = JUMP;
+        boat.onWater = false;
+        splash(boat.x, 8);
+      }
+    }
+
+    document.addEventListener("keydown", (e) => {
+      if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", " "].includes(e.key)) {
+        e.preventDefault();
+      }
+      if ((e.key === "ArrowUp" || e.key === " ") && !e.repeat) jump();
+      keys[e.key] = true;
+    });
+    document.addEventListener("keyup", (e) => { keys[e.key] = false; });
+
+    function spawnObstacle() {
+      const type = OBSTACLES[Math.floor(Math.random() * OBSTACLES.length)];
+      obstacles.push({ ...type, x: W + 40 });
+      // occasionally a close pair you can clear in one jump
+      if (Math.random() < 0.2 && speed > 6) {
+        const t2 = OBSTACLES[Math.floor(Math.random() * OBSTACLES.length)];
+        obstacles.push({ ...t2, x: W + 40 + type.w + 10 });
+      }
+      // gap shrinks a little as speed rises, but always leaves room to land
+      const minGap = 45;
+      nextSpawn = minGap + Math.random() * 60 + (MAX_SPEED - speed) * 3;
+    }
+
+    function splash(x, n) {
+      for (let i = 0; i < n; i++) {
+        splashes.push({
+          x: x + (Math.random() - 0.5) * 30,
+          y: WATER_Y,
+          vx: (Math.random() - 0.5) * 3 - 1,
+          vy: -Math.random() * 4 - 1,
+          life: 30,
+        });
+      }
+    }
+
+    function boatBox() {
+      return { x: boat.x - boat.w / 2 + 6, y: boat.y - boat.h, w: boat.w - 12, h: boat.h - 4 };
+    }
+
+    // how far each obstacle sits below the waterline, in pixels
+    function obstacleSink(o) {
+      return Math.round(o.size * 0.25);
+    }
+
+    // hit box only covers the part sticking out of the water
+    function obstacleBox(o) {
+      const h = Math.max(10, o.h - obstacleSink(o));
+      return { x: o.x - o.w / 2, y: WATER_Y - h, w: o.w, h };
+    }
+
+    function overlap(a, b) {
+      return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+    }
+
+    function gameOver() {
+      state = "over";
+      splash(boat.x, 20);
+      const score = Math.floor(distance);
+      if (score > best) {
+        best = score;
+        localStorage.setItem("lakeRunBest", best);
+      }
+    }
+
+    function update() {
+      waveT += 1;
+
+      for (const s of splashes) {
+        s.x += s.vx; s.y += s.vy; s.vy += 0.25; s.life--;
+      }
+      splashes = splashes.filter((s) => s.life > 0);
+
+      for (const f of wake) { f.x -= speed; f.life--; }
+      wake = wake.filter((f) => f.life > 0);
+
+      if (state !== "playing") return;
+
+      // foam trail behind the boat while it's in the water
+      if (boat.onWater) {
+        wake.push({ x: boat.x - 20, y: WATER_Y + 1 + Math.random() * 3, life: 40, max: 40 });
+      }
+
+      speed = Math.min(MAX_SPEED, START_SPEED + distance / 250);
+      distance += speed / 10;
+
+      // vertical movement
+      if (!boat.onWater) {
+        boat.vy += GRAVITY + (keys.ArrowDown ? FAST_FALL : 0);
+        boat.y += boat.vy;
+        if (boat.y >= WATER_Y) {
+          boat.y = WATER_Y;
+          boat.vy = 0;
+          boat.onWater = true;
+          splash(boat.x, 10);
+        }
+      }
+
+      // horizontal movement
+      if (keys.ArrowLeft) boat.x -= SIDE_SPEED;
+      if (keys.ArrowRight) boat.x += SIDE_SPEED;
+      boat.x = Math.max(boat.w / 2, Math.min(W * 0.6, boat.x));
+
+      // obstacles
+      nextSpawn--;
+      if (nextSpawn <= 0) spawnObstacle();
+
+      const bb = boatBox();
+      for (const o of obstacles) {
+        o.x -= speed;
+        if (overlap(bb, obstacleBox(o))) { gameOver(); break; }
+      }
+      obstacles = obstacles.filter((o) => o.x > -60);
+    }
+
+    function drawEmoji(emoji, x, y, size, flip = false, alpha = 1) {
+      ctx.save();
+      ctx.translate(x, y);
+      if (flip) ctx.scale(-1, 1);
+      // color emoji ignore fillStyle's color but still pick up its alpha, so force it opaque
+      ctx.fillStyle = "#000";
+      ctx.globalAlpha = alpha;
+      ctx.font = `${size}px "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "bottom";
+      ctx.fillText(emoji, 0, 0);
+      ctx.restore();
+    }
+
+    // faint upside-down copy of an emoji in the water, squashed for perspective.
+    // baseY/rot match the values used to draw the real emoji.
+    function drawReflection(emoji, x, baseY, size, flip = false, rot = 0) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(0, WATER_Y, W, H - WATER_Y);
+      ctx.clip();
+      ctx.translate(x, WATER_Y);
+      ctx.scale(1, -0.6);
+      ctx.translate(0, baseY - WATER_Y);
+      ctx.rotate(rot);
+      drawEmoji(emoji, 0, 0, size, flip, 0.3);
+      ctx.restore();
+    }
+
+    // --- cabin + dock (world x positions at the start of a run) ---
+    const CABIN_X = 40;
+    // dock runs underneath the cabin (which sits on top of it) and pokes out a bit on the right
+    const DOCK_START = CABIN_X - 100;
+    const DOCK_END = CABIN_X + 120;
+    const DOCK_TOP = WATER_Y - 14; // deck surface height
+    const DOCK_POST_GAP = 35;
+
+    function dockPosts(start, end) {
+      const xs = [];
+      for (let x = start + 6; x < end - 3; x += DOCK_POST_GAP) xs.push(x);
+      xs.push(end - 5);
+      return xs;
+    }
+
+    // wooden pier: deck boards with pilings poking up past the deck
+    function drawDockAboveWater(start, end) {
+      const len = end - start;
+      // pilings (behind the deck, sticking up a bit above it)
+      for (const x of dockPosts(start, end)) {
+        ctx.fillStyle = "#5c3a1a";
+        ctx.fillRect(x - 3, DOCK_TOP - 8, 7, WATER_Y - DOCK_TOP + 8);
+        ctx.fillStyle = "#7a4f28";
+        ctx.fillRect(x - 3, DOCK_TOP - 8, 3, WATER_Y - DOCK_TOP + 8);
+      }
+      // deck: side board, sunlit top edge, plank seams
+      ctx.fillStyle = "#8b5a2b";
+      ctx.fillRect(start, DOCK_TOP, len, 7);
+      ctx.fillStyle = "#c08a52";
+      ctx.fillRect(start, DOCK_TOP, len, 2);
+      ctx.fillStyle = "rgba(60, 35, 15, 0.6)";
+      for (let x = start + 14; x < end; x += 14) ctx.fillRect(x, DOCK_TOP + 2, 1, 5);
+      // shadow under the deck
+      ctx.fillStyle = "rgba(0, 0, 0, 0.25)";
+      ctx.fillRect(start, DOCK_TOP + 7, len, 3);
+      // mooring rope from the last piling to the boat, until the boat casts off
+      if (state !== "ready") return;
+      ctx.strokeStyle = "#d6c29a";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(end - 3, DOCK_TOP - 5);
+      ctx.quadraticCurveTo(end + 12, DOCK_TOP + 6, end + 22, DOCK_TOP - 2);
+      ctx.stroke();
+    }
+
+    // submerged part of the pilings, faint through the water, with a ripple ring at the surface
+    function drawDockBelowWater(start, end) {
+      for (const x of dockPosts(start, end)) {
+        ctx.fillStyle = "rgba(60, 40, 20, 0.35)";
+        ctx.fillRect(x - 3, WATER_Y, 7, 22);
+        ctx.fillStyle = "rgba(255, 255, 255, 0.4)";
+        ctx.beginPath();
+        ctx.ellipse(x + 0.5, WATER_Y + 1, 7, 1.5, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    // --- focus helpers: keep the eye on the waterline where the action is ---
+
+    // depth of field: soften and slightly desaturate the sky + scenery so the sharp
+    // boat, cabin and obstacles stand out. Done as one copy so the blur runs once per frame.
+    const bgCanvas = document.createElement("canvas");
+    bgCanvas.width = W;
+    bgCanvas.height = WATER_Y;
+    const bgCtx = bgCanvas.getContext("2d");
+    function blurBackground() {
+      bgCtx.clearRect(0, 0, W, WATER_Y);
+      bgCtx.drawImage(canvas, 0, 0, W, WATER_Y, 0, 0, W, WATER_Y);
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(0, 0, W, WATER_Y);
+      ctx.clip();
+      ctx.filter = "none"; // was "blur(1px) saturate(0.8) brightness(1.03)"
+      ctx.drawImage(bgCanvas, 0, 0);
+      ctx.restore();
+    }
+
+    // soft dark shadow around the main subjects so they separate from the background
+    function withSubjectShadow(drawFn) {
+      ctx.save();
+      ctx.shadowColor = "rgba(0, 0, 0, 0.2)";
+      ctx.shadowBlur = 3;
+      ctx.shadowOffsetY = 2;
+      drawFn();
+      ctx.restore();
+    }
+
+    // darken the top of the sky, the bottom of the water and the corners,
+    // leaving a bright band along the waterline
+    function drawFocusVignette() {
+      const band = ctx.createLinearGradient(0, 0, 0, H);
+      band.addColorStop(0, "rgba(10, 20, 40, 0.15)");
+      band.addColorStop((WATER_Y - 140) / H, "rgba(10, 20, 40, 0)");
+      band.addColorStop((WATER_Y + 25) / H, "rgba(10, 20, 40, 0)");
+      band.addColorStop(1, "rgba(10, 20, 40, 0.2)");
+      ctx.fillStyle = band;
+      ctx.fillRect(0, 0, W, H);
+
+      const cx = W / 2;
+      const cy = WATER_Y - 30;
+      const vignette = ctx.createRadialGradient(cx, cy, 220, cx, cy, W * 0.7);
+      vignette.addColorStop(0, "rgba(0, 0, 0, 0)");
+      vignette.addColorStop(1, "rgba(0, 0, 0, 0.15)");
+      ctx.fillStyle = vignette;
+      ctx.fillRect(0, 0, W, H);
+    }
+
+    // stable pseudo-random number in [0, 1) for an integer seed, so scenery
+    // looks random but is identical every frame and lines up while scrolling
+    function rand(i) {
+      const s = Math.sin(i * 12.9898) * 43758.5453;
+      return s - Math.floor(s);
+    }
+
+    const SUN_X = W - 110;
+    const SUN_Y = 75;
+
+    // build a cumulus cloud once on an offscreen canvas: a flat-bottomed heap of
+    // puffs, grey-blue underneath and bright white where the sun (on the right) hits
+    function makeCloud(seed, w, h) {
+      const c = document.createElement("canvas");
+      c.width = w;
+      // extra headroom so the tallest puffs aren't cut off
+      c.height = Math.ceil(h * 1.3);
+      const g = c.getContext("2d");
+      const baseY = h * 1.15;
+      const puffs = [];
+      const n = 10 + Math.floor(rand(seed) * 6);
+      for (let i = 0; i < n; i++) {
+        const t = rand(seed + i * 3 + 1);
+        const x = w * (0.2 + t * 0.6);
+        // puffs near the middle are bigger, giving a domed top
+        const r = h * (0.18 + (1 - Math.abs(t - 0.5) * 2) * 0.22) * (0.75 + rand(seed + i * 3 + 2) * 0.5);
+        const y = baseY - r * (0.3 + rand(seed + i * 3 + 3) * 0.7);
+        puffs.push({ x, y, r });
+      }
+      g.save();
+      g.beginPath();
+      g.rect(0, 0, w, baseY);
+      g.clip();
+      g.fillStyle = "#b9c7d6";
+      for (const p of puffs) { g.beginPath(); g.arc(p.x, p.y, p.r, 0, Math.PI * 2); g.fill(); }
+      g.fillStyle = "#e8eef5";
+      for (const p of puffs) { g.beginPath(); g.arc(p.x + p.r * 0.06, p.y - p.r * 0.12, p.r * 0.92, 0, Math.PI * 2); g.fill(); }
+      g.fillStyle = "#ffffff";
+      for (const p of puffs) { g.beginPath(); g.arc(p.x + p.r * 0.15, p.y - p.r * 0.22, p.r * 0.75, 0, Math.PI * 2); g.fill(); }
+      g.restore();
+      return c;
+    }
+
+    // y = height in sky; higher clouds are smaller and drift slower (farther away)
+    const CLOUDS = [
+      { img: makeCloud(11, 220, 90), x: 80, y: 30, parallax: 0.08, drift: 0.10, alpha: 0.95 },
+      { img: makeCloud(23, 160, 70), x: 420, y: 70, parallax: 0.12, drift: 0.14, alpha: 0.9 },
+      { img: makeCloud(37, 260, 100), x: 700, y: 20, parallax: 0.07, drift: 0.09, alpha: 0.95 },
+      { img: makeCloud(51, 120, 50), x: 1000, y: 100, parallax: 0.16, drift: 0.18, alpha: 0.85 },
+      { img: makeCloud(67, 180, 75), x: 1250, y: 55, parallax: 0.1, drift: 0.12, alpha: 0.9 },
+    ];
+
+    function drawSky() {
+      // deep blue overhead fading to a pale, slightly warm haze at the horizon
+      const sky = ctx.createLinearGradient(0, 0, 0, WATER_Y);
+      sky.addColorStop(0, "#1e6fb8");
+      sky.addColorStop(0.45, "#4f9fd9");
+      sky.addColorStop(0.8, "#a9d2ee");
+      sky.addColorStop(1, "#e9eef0");
+      ctx.fillStyle = sky;
+      ctx.fillRect(0, 0, W, WATER_Y);
+
+      // wide warm glow that brightens the sky around the sun
+      ctx.save();
+      ctx.globalCompositeOperation = "lighter";
+      const glow = ctx.createRadialGradient(SUN_X, SUN_Y, 0, SUN_X, SUN_Y, 260);
+      glow.addColorStop(0, "rgba(255, 240, 200, 0.55)");
+      glow.addColorStop(0.15, "rgba(255, 225, 170, 0.3)");
+      glow.addColorStop(0.5, "rgba(255, 210, 150, 0.08)");
+      glow.addColorStop(1, "rgba(255, 200, 140, 0)");
+      ctx.fillStyle = glow;
+      ctx.fillRect(0, 0, W, WATER_Y);
+      ctx.restore();
+
+      // thin, high cirrus streaks
+      ctx.save();
+      ctx.fillStyle = "rgba(255, 255, 255, 0.18)";
+      const cirrusShift = distance * 0.3 + waveT * 0.03;
+      for (let i = 0; i < 6; i++) {
+        const span = W + 400;
+        const x = (((rand(i + 40) * span - cirrusShift) % span) + span) % span - 200;
+        const y = 20 + rand(i + 50) * 60;
+        ctx.beginPath();
+        ctx.ellipse(x, y, 90 + rand(i + 60) * 80, 3 + rand(i + 70) * 3, -0.05, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+
+      // sun: white-hot center fading to pale yellow at the rim
+      const disc = ctx.createRadialGradient(SUN_X, SUN_Y, 0, SUN_X, SUN_Y, 30);
+      disc.addColorStop(0, "#ffffff");
+      disc.addColorStop(0.6, "#fffbe6");
+      disc.addColorStop(0.9, "#fff1b8");
+      disc.addColorStop(1, "rgba(255, 236, 170, 0)");
+      ctx.fillStyle = disc;
+      ctx.beginPath();
+      ctx.arc(SUN_X, SUN_Y, 30, 0, Math.PI * 2);
+      ctx.fill();
+
+      // cumulus clouds, drifting slowly and passing in front of the sun
+      const span = W + 600;
+      for (const c of CLOUDS) {
+        const x = (((c.x - distance * 10 * c.parallax - waveT * c.drift) % span) + span) % span - 300;
+        ctx.globalAlpha = c.alpha;
+        ctx.drawImage(c.img, x, c.y);
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    function drawConifer(x, baseY, h, color, light) {
+      const w = h * 0.38;
+      ctx.fillStyle = "#3f2a1d";
+      ctx.fillRect(x - 1.5, baseY - h * 0.15, 3, h * 0.15);
+      // three overlapping tiers, each narrower toward the top
+      for (let tier = 0; tier < 3; tier++) {
+        const top = baseY - h + tier * h * 0.22;
+        const bottom = baseY - h * 0.1 - (2 - tier) * h * 0.2;
+        const half = w * (0.55 + tier * 0.22);
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.moveTo(x, top);
+        ctx.lineTo(x + half, bottom);
+        ctx.lineTo(x - half, bottom);
+        ctx.closePath();
+        ctx.fill();
+        // sunlit right side (sun is on the right)
+        ctx.fillStyle = light;
+        ctx.beginPath();
+        ctx.moveTo(x, top);
+        ctx.lineTo(x + half, bottom);
+        ctx.lineTo(x + half * 0.2, bottom);
+        ctx.closePath();
+        ctx.fill();
+      }
+    }
+
+    // layered background: hazy mountains, a forest line, then bushes on the shore.
+    // farther layers scroll slower (parallax) and are paler/bluer (atmospheric haze).
+    function drawScenery() {
+      const scroll = distance * 10;
+
+      // far mountains
+      const mScroll = scroll * 0.05;
+      ctx.fillStyle = "#94b8c8";
+      ctx.beginPath();
+      ctx.moveTo(0, WATER_Y);
+      for (let x = 0; x <= W; x += 4) {
+        const wx = x + mScroll;
+        const y = WATER_Y - 95
+          - Math.sin(wx * 0.006) * 35
+          - Math.sin(wx * 0.017 + 1.3) * 15
+          - Math.abs(Math.sin(wx * 0.041)) * 8;
+        ctx.lineTo(x, y);
+      }
+      ctx.lineTo(W, WATER_Y);
+      ctx.closePath();
+      ctx.fill();
+
+      // nearer rolling hills
+      const hScroll = scroll * 0.15;
+      ctx.fillStyle = "#6f9a6a";
+      ctx.beginPath();
+      ctx.moveTo(0, WATER_Y);
+      for (let x = 0; x <= W; x += 4) {
+        const wx = x + hScroll;
+        const y = WATER_Y - 45 - Math.sin(wx * 0.009 + 2) * 18 - Math.sin(wx * 0.023) * 8;
+        ctx.lineTo(x, y);
+      }
+      ctx.lineTo(W, WATER_Y);
+      ctx.closePath();
+      ctx.fill();
+
+      // forest line: two rows of conifers, back row paler
+      const rows = [
+        { parallax: 0.3, spacing: 14, minH: 28, maxH: 50, seed: 0, lightness: 30, base: WATER_Y - 6 },
+        { parallax: 0.45, spacing: 20, minH: 34, maxH: 66, seed: 1000, lightness: 21, base: WATER_Y - 2 },
+      ];
+      for (const row of rows) {
+        const offset = scroll * row.parallax;
+        const first = Math.floor(offset / row.spacing) - 2;
+        const last = first + Math.ceil(W / row.spacing) + 4;
+        ctx.fillStyle = `hsl(140, 25%, ${row.lightness - 4}%)`;
+        ctx.fillRect(0, row.base - 8, W, WATER_Y - row.base + 8);
+        for (let i = first; i <= last; i++) {
+          const r = rand(i + row.seed);
+          // leave occasional gaps so it doesn't look like a fence
+          if (r < 0.12) continue;
+          const x = i * row.spacing - offset + (rand(i + row.seed + 500) - 0.5) * row.spacing * 0.8;
+          const h = row.minH + rand(i + row.seed + 200) * (row.maxH - row.minH);
+          const hue = 130 + rand(i + row.seed + 300) * 25;
+          const l = row.lightness + (rand(i + row.seed + 400) - 0.5) * 6;
+          drawConifer(x, row.base, h, `hsl(${hue}, 30%, ${l}%)`, `hsl(${hue}, 32%, ${l + 7}%)`);
+        }
+      }
+
+      // shoreline bushes: clumps of overlapping leafy blobs
+      const bOffset = scroll * 0.6;
+      const bSpacing = 34;
+      const firstB = Math.floor(bOffset / bSpacing) - 2;
+      const lastB = firstB + Math.ceil(W / bSpacing) + 4;
+      for (let i = firstB; i <= lastB; i++) {
+        if (rand(i + 7000) < 0.25) continue;
+        const cx = i * bSpacing - bOffset + (rand(i + 7100) - 0.5) * 20;
+        const size = 7 + rand(i + 7200) * 9;
+        const hue = 85 + rand(i + 7300) * 40;
+        const blobs = 4 + Math.floor(rand(i + 7400) * 3);
+        for (let b = 0; b < blobs; b++) {
+          const bx = cx + (rand(i * 10 + b + 8000) - 0.5) * size * 2.4;
+          const by = WATER_Y - size * 0.5 - rand(i * 10 + b + 9000) * size * 0.9;
+          const br = size * (0.55 + rand(i * 10 + b + 9500) * 0.45);
+          ctx.fillStyle = `hsl(${hue}, 38%, 22%)`;
+          ctx.beginPath();
+          ctx.arc(bx, by, br, 0, Math.PI * 2);
+          ctx.fill();
+          // highlight toward the sun
+          ctx.fillStyle = `hsla(${hue}, 45%, 38%, 0.8)`;
+          ctx.beginPath();
+          ctx.arc(bx + br * 0.25, by - br * 0.3, br * 0.55, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      // muddy bank where land meets water
+      ctx.fillStyle = "#5b4a32";
+      ctx.fillRect(0, WATER_Y - 2, W, 2);
+
+      // distant cabins sitting right on the far waterline, in front of the trees and bushes.
+      // they scroll at the same rate as the shoreline bushes since they're on the same shore.
+      const BG_CABINS = ["🏠", "🏡", "🛖", "⛺", "🏚️"];
+      const cOffset = scroll * 0.6;
+      const cSpacing = 240;
+      const firstC = Math.floor(cOffset / cSpacing) - 1;
+      const lastC = firstC + Math.ceil(W / cSpacing) + 2;
+      for (let i = firstC; i <= lastC; i++) {
+        if (rand(i + 6000) < 0.4) continue; // not every slot gets a cabin
+        const x = i * cSpacing - cOffset + (rand(i + 6100) - 0.5) * cSpacing * 0.6;
+        const size = 40 + rand(i + 6200) * 20;
+        const emoji = BG_CABINS[Math.floor(rand(i + 6300) * BG_CABINS.length)];
+        drawEmoji(emoji, x, WATER_Y + size * 0.08, size, rand(i + 6400) < 0.5);
+      }
+    }
+
+    function drawWater() {
+      const depthPx = H - WATER_Y;
+      const scroll = distance * 10;
+
+      // base color: lighter at the far waterline, deep blue up close
+      const base = ctx.createLinearGradient(0, WATER_Y, 0, H);
+      base.addColorStop(0, "#7dd3fc");
+      base.addColorStop(1, "#0c4a6e");
+      ctx.fillStyle = base;
+      ctx.fillRect(0, WATER_Y, W, depthPx);
+
+      // mirror the scenery above (sky, hills, cabin) in thin rows that sway sideways,
+      // which reads as a reflection broken up by small waves
+      const ROW = 2;
+      const STRETCH = 1.6; // how much scenery each row of water reflects
+      for (let y = 0; y < depthPx; y += ROW) {
+        const t = y / depthPx;
+        const srcY = WATER_Y - (y + ROW) * STRETCH;
+        if (srcY < 0) break;
+        const sway =
+          Math.sin(y * 0.35 + waveT * 0.08) * (1 + t * 4) +
+          Math.sin(y * 0.11 - waveT * 0.05) * 2;
+        ctx.drawImage(canvas, 0, srcY, W, ROW * STRETCH, sway, WATER_Y + y, W, ROW);
+      }
+
+      // tint over the reflection: water reflects more at a shallow angle (far away)
+      // and shows more of its own color up close
+      const tint = ctx.createLinearGradient(0, WATER_Y, 0, H);
+      tint.addColorStop(0, "rgba(14, 116, 144, 0.35)");
+      tint.addColorStop(1, "rgba(8, 47, 73, 0.85)");
+      ctx.fillStyle = tint;
+      ctx.fillRect(0, WATER_Y, W, depthPx);
+
+      // sun glitter: flickering bright flecks below the sun, spreading out up close
+      const sunX = SUN_X;
+      for (let i = 0; i < 40; i++) {
+        const t = (i * 0.618) % 1;
+        const y = WATER_Y + 2 + t * (depthPx - 4);
+        const x = sunX + Math.sin(i * 12.9898 + waveT * 0.02) * (10 + t * 50);
+        const flicker = 0.5 + 0.5 * Math.sin(waveT * 0.15 + i * 2.3);
+        ctx.fillStyle = `rgba(255, 250, 220, ${0.7 * flicker})`;
+        ctx.fillRect(x, y, 4 + t * 10, 1 + t * 1.5);
+      }
+
+      // ripples: small and bunched near the waterline, bigger and faster up close (parallax)
+      ctx.lineCap = "round";
+      const span = W + 120;
+      for (const r of RIPPLES) {
+        const d = r.depth * r.depth;
+        const y = WATER_Y + 3 + d * (depthPx - 6) + Math.sin(waveT * 0.05 + r.phase) * (0.5 + d);
+        const x = (((r.x - scroll * (1 + d * 0.8)) % span) + span) % span - 60;
+        const len = (12 + d * 40) * r.len;
+        const curve = 2 + d * 2;
+        ctx.lineWidth = 1 + d * 1.5;
+        ctx.strokeStyle = `rgba(255, 255, 255, ${0.15 + d * 0.25})`;
+        ctx.beginPath();
+        ctx.moveTo(x - len / 2, y);
+        ctx.quadraticCurveTo(x, y - curve, x + len / 2, y);
+        ctx.stroke();
+        ctx.strokeStyle = `rgba(3, 40, 60, ${0.15 + d * 0.2})`;
+        ctx.beginPath();
+        ctx.moveTo(x - len / 2, y + curve);
+        ctx.quadraticCurveTo(x, y, x + len / 2, y + curve);
+        ctx.stroke();
+      }
+
+      // shimmering waterline
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.5)";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      for (let x = 0; x <= W; x += 6) {
+        const y = WATER_Y + Math.sin(x * 0.05 + waveT * 0.1 + scroll * 0.05) * 1.2;
+        if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+
+      // boat wake foam, spreading and fading as it drifts back
+      for (const f of wake) {
+        const age = 1 - f.life / f.max;
+        ctx.fillStyle = `rgba(255, 255, 255, ${0.6 * (1 - age)})`;
+        ctx.beginPath();
+        ctx.ellipse(f.x, f.y, 3 + age * 12, 1.5 + age, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    function drawText(text, y, size, color = "#fff") {
+      ctx.font = `bold ${size}px system-ui, sans-serif`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "alphabetic";
+      ctx.lineWidth = 5;
+      ctx.strokeStyle = "#0f172a";
+      ctx.strokeText(text, W / 2, y);
+      ctx.fillStyle = color;
+      ctx.fillText(text, W / 2, y);
+    }
+
+    function draw() {
+      drawSky();
+      drawScenery();
+      blurBackground();
+
+      // starting cabin + dock on the left shore — scroll away at water speed as the boat leaves
+      // (distance * 10 = pixels scrolled, same rate as the obstacles and wave streaks)
+      const scrolled = distance * 10;
+      const cabinX = CABIN_X - scrolled;
+      const dockStart = DOCK_START - scrolled;
+      const dockEnd = DOCK_END - scrolled;
+      // deck is drawn before the water so it shows up in the reflection
+      if (dockEnd > 0) drawDockAboveWater(dockStart, dockEnd);
+      if (cabinX > -160) {
+        ctx.fillStyle = "#65a30d";
+        ctx.beginPath();
+        // ctx.ellipse(cabinX, WATER_Y, 110, 34, 0, Math.PI, 0);
+        ctx.fill();
+        withSubjectShadow(() => drawEmoji("🏠", cabinX, DOCK_TOP+32, 200));
+      }
+
+      // lake (must come after everything it reflects)
+      drawWater();
+      if (dockEnd > 0) drawDockBelowWater(dockStart, dockEnd);
+
+      // obstacles: partly submerged, bobbing gently on the water
+      for (const o of obstacles) {
+        const bob = Math.sin((waveT + o.x) / 25) * 1;
+        const baseY = WATER_Y + 8 + obstacleSink(o) + bob;
+        const surfaceY = WATER_Y + 1 + bob;
+        drawReflection(o.emoji, o.x, baseY, o.size);
+
+        // part above the surface: fully visible
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(0, 0, W, surfaceY);
+        ctx.clip();
+        withSubjectShadow(() => drawEmoji(o.emoji, o.x, baseY, o.size));
+        ctx.restore();
+
+        // part below the surface: faint, as if seen through the water
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(0, surfaceY, W, H - surfaceY);
+        ctx.clip();
+        drawEmoji(o.emoji, o.x, baseY, o.size, false, 0.25);
+        ctx.restore();
+
+        // foam ring where it meets the water
+        ctx.fillStyle = "rgba(255, 255, 255, 0.45)";
+        ctx.beginPath();
+        ctx.ellipse(o.x, surfaceY, o.w * 0.55, 2.5, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // boat — emoji faces left on most platforms, so flip it to face the direction of travel
+      const bob = boat.onWater && state !== "over" ? Math.sin(waveT / 8) * 2 : 0;
+      const tilt = boat.onWater ? 0 : Math.max(-0.35, Math.min(0.35, boat.vy / 30));
+      drawReflection("⛵", boat.x, boat.y + 6 + bob, 56, true, tilt);
+      ctx.save();
+      ctx.translate(boat.x, boat.y + 6 + bob);
+      ctx.rotate(tilt);
+      withSubjectShadow(() => drawEmoji("⛵", 0, 0, 75, true));
+      ctx.restore();
+
+      // splashes
+      ctx.fillStyle = "rgba(255,255,255,0.9)";
+      for (const s of splashes) {
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // drawFocusVignette(); // edge darkening — disabled for now
+
+      // HUD
+      const score = Math.floor(distance);
+      if (state === "playing") {
+        ctx.font = "bold 24px system-ui, sans-serif";
+        ctx.textAlign = "right";
+        ctx.textBaseline = "top";
+        // white with a soft shadow so it reads against the deep blue sky and the sun glow
+        ctx.save();
+        ctx.shadowColor = "rgba(0, 0, 0, 0.5)";
+        ctx.shadowBlur = 4;
+        ctx.fillStyle = "#ffffff";
+        ctx.fillText(`${score} m`, W - 20, 16);
+        ctx.font = "16px system-ui, sans-serif";
+        ctx.fillStyle = "#e2e8f0";
+        ctx.fillText(`Best ${best} m`, W - 20, 46);
+        ctx.restore();
+      } else if (state === "ready") {
+        drawText("Press ↑ to start — jump over the obstacles!", 130, 22);
+        if (best) drawText(`Best: ${best} m`, 180, 18, "#fde68a");
+      } else {
+        drawText("Crash!", 120, 52, "#fca5a5");
+        drawText(`Distance: ${score} m`, 170, 26);
+        drawText(`Best: ${best} m`, 205, 22, "#fde68a");
+        drawText("Press ↑ to retry", 250, 20);
+      }
+    }
+
+    // fixed 60Hz timestep so speed is the same on 60Hz and 120Hz displays
+    const STEP = 1000 / 60;
+    let last = performance.now();
+    let acc = 0;
+    function loop(now) {
+      acc += Math.min(now - last, 250);
+      last = now;
+      while (acc >= STEP) {
+        update();
+        acc -= STEP;
+      }
+      draw();
+      requestAnimationFrame(loop);
+    }
+
+    reset();
+    requestAnimationFrame(loop);
+  </script>
+</body>
+</html>
