@@ -7,3 +7,6 @@
 - change the background from night to day, etc.
 - add mobile view = DONE
 - remove the laptop functionality of the left and right keys = DONE
+- have a health bar and variable negative obstacle impact instead of immediate death
+- add sound effects
+- add updates to the instructions bar
